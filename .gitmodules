@@ -1,0 +1,3 @@
+[submodule "3party/cdcontainers"]
+	path = 3party/cdcontainers
+	url = git@github.com:maksimandrianov/cdcontainers.git

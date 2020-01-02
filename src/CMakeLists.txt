@@ -1,0 +1,23 @@
+project(ccache)
+
+set(LIB_VERSION_MAJOR 0)
+set(LIB_VERSION_MINOR 1)
+set(LIB_VERSION_PATCH 0)
+set(LIB_FULL_VERSION ${LIB_VERSION_MAJOR}.${LIB_VERSION_MINOR}.${LIB_VERSION_PATCH})
+
+set(SOURCE
+  lru.c
+)
+
+include_directories("${PROJECT_INCLUDE_DIR}")
+
+add_library(${PROJECT_NAME} SHARED ${SOURCE})
+
+target_link_libraries(${PROJECT_NAME} cdcontainers)
+
+set_target_properties(${LIBRARY_NAME} PROPERTIES
+  VERSION ${LIB_FULL_VERSION}
+  SOVERSION ${LIB_VERSION_MAJOR})
+
+install(TARGETS ${PROJECT_NAME} DESTINATION lib)
+install(DIRECTORY ${PROJECT_INCLUDE_DIR} DESTINATION .)

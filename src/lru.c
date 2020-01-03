@@ -22,28 +22,130 @@
 
 #include <cdcontainers/data-info.h>
 #include <cdcontainers/hash-table.h>
-#include <cdcontainers/list.h>
 
-static void free_map_entry(void *data)
+static struct cc_lru_list_node *list_new_node(void *key, void *value)
 {
-  struct cdc_pair *pair = (struct cdc_pair *)data;
-  free(pair->second);
-}
-
-static void free_list_item(struct cc_lru_cache *c, struct cdc_pair *kv)
-{
-  if(CDC_HAS_DFREE(c->dinfo)) {
-    c->dinfo->dfree(kv);
+  struct cc_lru_list_node *node =
+      (struct cc_lru_list_node *)malloc(sizeof(struct cc_lru_list_node));
+  if (node) {
+    node->kv.first = key;
+    node->kv.second = value;
   }
 
-  free(kv);
+  return node;
 }
 
-static void free_list_items(struct cc_lru_cache *c)
+static void list_free_node(struct cc_lru_list *l, struct cc_lru_list_node *node)
 {
-  CDC_LIST_FOR_EACH(item, c->list) {
-    free_list_item(c, (struct cdc_pair *)item->data);
+  if (CDC_HAS_DFREE(l->dinfo)) {
+    l->dinfo->dfree(&node->kv);
   }
+
+  free(node);
+}
+
+static void list_free_items(struct cc_lru_list *l)
+{
+  struct cc_lru_list_node *next = NULL;
+  while (l->head) {
+    next = l->head->next;
+    list_free_node(l, l->head);
+    l->head = next;
+  }
+}
+
+static enum cdc_stat list_ctor(struct cc_lru_list *l,
+                               struct cdc_data_info *info)
+{
+  l->head = NULL;
+  l->tail = NULL;
+  if (info) {
+    l->dinfo = cdc_di_shared_ctorc(info);
+    if (!l->dinfo) {
+      return CDC_STATUS_BAD_ALLOC;
+    }
+  } else {
+    l->dinfo = NULL;
+  }
+
+  return CDC_STATUS_OK;
+}
+
+static void list_dtor(struct cc_lru_list *l)
+{
+  list_free_items(l);
+  cdc_di_shared_dtor(l->dinfo);
+}
+
+static void list_push_front_node(struct cc_lru_list *l,
+                                 struct cc_lru_list_node *node)
+{
+  if (l->head) {
+    node->next = l->head;
+    l->head->prev = node;
+  } else {
+    node->next = NULL;
+    l->tail = node;
+  }
+
+  node->prev = NULL;
+  l->head = node;
+}
+
+static void list_unlink_node(struct cc_lru_list *l,
+                             struct cc_lru_list_node *node)
+{
+  if (l->head == node) {
+    struct cc_lru_list_node *new_head = l->head->next;
+    if (new_head) {
+      new_head->prev = NULL;
+      l->head = new_head;
+    } else {
+      l->tail = NULL;
+      l->head = NULL;
+    }
+  } else if (l->tail == node) {
+    struct cc_lru_list_node *new_tail = l->tail->prev;
+    if (new_tail) {
+      new_tail->next = NULL;
+      l->tail = new_tail;
+    } else {
+      l->tail = NULL;
+      l->head = NULL;
+    }
+  } else {
+    node->next->prev = node->prev;
+    node->prev->next = node->next;
+  }
+}
+
+static enum cdc_stat insert_new(struct cc_lru_cache *c, void *key, void *value)
+{
+  if (cc_lru_cache_size(c) + 1 > cc_lru_cache_max_size(c)) {
+    cc_lru_cache_erase(c, c->list.tail->kv.first);
+  }
+
+  struct cc_lru_list_node *node = list_new_node(key, value);
+  if (!node) {
+    return CDC_STATUS_BAD_ALLOC;
+  }
+
+  enum cdc_stat stat = cdc_hash_table_insert(c->table, key, node, NULL /* it */,
+                                             NULL /* inserted */);
+  if (stat != CDC_STATUS_OK) {
+    list_free_node(&c->list, node);
+    return stat;
+  }
+
+  list_push_front_node(&c->list, node);
+  return CDC_STATUS_OK;
+}
+
+static void update_position(struct cc_lru_cache *c,
+                            struct cc_lru_list_node *node)
+{
+  list_unlink_node(&c->list, node);
+  list_push_front_node(&c->list, node);
 }
 
 enum cdc_stat cc_lru_cache_ctor(struct cc_lru_cache **c, size_t max_size,
@@ -60,21 +162,22 @@ enum cdc_stat cc_lru_cache_ctor(struct cc_lru_cache **c, size_t max_size,
   }
 
   enum cdc_stat stat = CDC_STATUS_OK;
-  if (info && !(tmp->dinfo = cdc_di_shared_ctorc(info))) {
-    stat = CDC_STATUS_BAD_ALLOC;
-    goto free_cache;
+  if (CDC_HAS_DFREE(info)) {
+    struct cdc_data_info list_info = CDC_INIT_STRUCT;
+    list_info.dfree = info->dfree;
+    stat = list_ctor(&tmp->list, &list_info);
+  } else {
+    stat = list_ctor(&tmp->list, NULL);
   }
 
-  stat = cdc_list_ctor(&tmp->list, NULL);
   if (stat != CDC_STATUS_OK) {
-    goto free_di;
+    goto free_cache;
   }
 
   struct cdc_data_info ht_info = CDC_INIT_STRUCT;
   ht_info.hash = info->hash;
   ht_info.eq = info->eq;
-  ht_info.dfree = free_map_entry;
-  stat = cdc_hash_table_ctor(&tmp->map, &ht_info);
+  stat = cdc_hash_table_ctor(&tmp->table, &ht_info);
   if (stat != CDC_STATUS_OK) {
     goto free_list;
   }
@@ -84,9 +187,7 @@ enum cdc_stat cc_lru_cache_ctor(struct cc_lru_cache **c, size_t max_size,
   return CDC_STATUS_OK;
 
 free_list:
-  cdc_list_dtor(tmp->list);
-free_di:
-  cdc_di_shared_dtor(tmp->dinfo);
+  list_dtor(&tmp->list);
 free_cache:
   free(tmp);
   return stat;
@@ -96,10 +197,8 @@ void cc_lru_cache_dtor(struct cc_lru_cache *c)
 {
   assert(c != NULL);
 
-  cdc_hash_table_dtor(c->map);
-  free_list_items(c);
-  cdc_list_dtor(c->list);
-  cdc_di_shared_dtor(c->dinfo);
+  cdc_hash_table_dtor(c->table);
+  list_dtor(&c->list);
   free(c);
 }
 
@@ -108,21 +207,14 @@ enum cdc_stat cc_lru_cache_get(struct cc_lru_cache *c, void *key, void **value)
   assert(c != NULL);
   assert(value != NULL);
 
-  struct cdc_list_iter *iter = NULL;
-  enum cdc_stat stat = cdc_hash_table_get(c->map, key, (void **)&iter);
+  struct cc_lru_list_node *node = NULL;
+  enum cdc_stat stat = cdc_hash_table_get(c->table, key, (void **)&node);
   if (stat != CDC_STATUS_OK) {
     return stat;
   }
 
-  struct cdc_pair *kv = (struct cdc_pair *)cdc_list_iter_data(iter);
-  *value = kv->second;
-
-  struct cdc_list_iter it_begin = CDC_INIT_STRUCT;
-  cdc_list_begin(c->list, &it_begin);
-
-  struct cdc_list_iter it_last = *iter;
-  cdc_list_iter_next(&it_last);
-  cdc_list_splice(&it_begin, iter, &it_last);
+  update_position(c, node);
+  *value = node->kv.second;
   return CDC_STATUS_OK;
 }
 
@@ -130,92 +222,100 @@ bool cc_lru_cache_contains(struct cc_lru_cache *c, void *key)
 {
   assert(c != NULL);
 
-  return cdc_hash_table_count(c->map, key) != 0;
+  struct cc_lru_list_node *node = NULL;
+  enum cdc_stat stat = cdc_hash_table_get(c->table, key, (void **)&node);
+  if (stat == CDC_STATUS_NOT_FOUND) {
+    return false;
+  }
+
+  update_position(c, node);
+  return true;
 }
 
 size_t cc_lru_cache_size(struct cc_lru_cache *c)
 {
   assert(c != NULL);
-  assert(cdc_list_size(c->list) == cdc_hash_table_size(c->map));
 
-  return cdc_list_size(c->list);
+  return cdc_hash_table_size(c->table);
 }
 
 bool cc_lru_cache_empty(struct cc_lru_cache *c)
 {
   assert(c != NULL);
-  assert(cdc_list_empty(c->list) == cdc_hash_table_empty(c->map));
 
-  return cdc_list_empty(c->list);
+  return cdc_hash_table_empty(c->table);
 }
 
 enum cdc_stat cc_lru_cache_insert(struct cc_lru_cache *c, void *key,
-                                  void *value)
+                                  void *value, bool *inserted)
 {
   assert(c != NULL);
 
-  if (cc_lru_cache_size(c) + 1 > cc_lru_cache_max_size(c)) {
-    struct cdc_pair *kv = (struct cdc_pair *)cdc_list_back(c->list);
-    cc_lru_cache_erase(c, kv->first);
+  if (cdc_hash_table_count(c->table, key) != 0) {
+    if (inserted) {
+      *inserted = false;
+    }
+
+    return CDC_STATUS_OK;
   }
 
-  struct cdc_pair *kv = (struct cdc_pair *)malloc(sizeof(struct cdc_pair));
-  if (!kv) {
-    return CDC_STATUS_BAD_ALLOC;
+  enum cdc_stat stat = insert_new(c, key, value);
+  if (stat == CDC_STATUS_OK && inserted) {
+    *inserted = true;
   }
 
-  kv->first = key;
-  kv->second = value;
-  struct cdc_list_iter *iter =
-      (struct cdc_list_iter *)malloc(sizeof(struct cdc_list_iter));
-  if (!iter) {
-    free(kv);
-    return CDC_STATUS_BAD_ALLOC;
+  return stat;
+}
+
+enum cdc_stat cc_lru_cache_insert_or_assign(struct cc_lru_cache *c, void *key,
+                                            void *value, bool *inserted)
+{
+  struct cc_lru_list_node *node = NULL;
+  if (cdc_hash_table_get(c->table, key, (void **)&node) == CDC_STATUS_OK) {
+    // Try to remove old value.
+    if (CDC_HAS_DFREE(c->list.dinfo)) { 
+      struct cdc_pair kv = {NULL, node->kv.second};
+      c->list.dinfo->dfree(&kv);
+    }
+
+    node->kv.second = value;
+    update_position(c, node);
+    if (inserted) {
+      *inserted = false;
+    }
+
+    return CDC_STATUS_OK;
   }
 
-  enum cdc_stat stat = cdc_list_push_front(c->list, kv);
-  if (stat != CDC_STATUS_OK) {
-    goto free_data;
+  enum cdc_stat stat = insert_new(c, key, value);
+  if (stat == CDC_STATUS_OK && inserted) {
+    *inserted = true;
   }
 
-  cdc_list_begin(c->list, iter);
-  stat = cdc_hash_table_insert(c->map, key, iter, NULL /* it */,
-                               NULL /* inserted */);
-  if (stat != CDC_STATUS_OK) {
-    cdc_list_pop_front(c->list);
-    goto free_data;
-  }
-
-  return CDC_STATUS_OK;
-
-free_data:
-  free(kv);
-  free(iter);
   return stat;
 }
 
 void cc_lru_cache_erase(struct cc_lru_cache *c, void *key)
 {
   assert(c != NULL);
-  assert(cc_lru_cache_contains(c, key));
 
-  struct cdc_list_iter *iter = NULL;
-  enum cdc_stat stat = cdc_hash_table_get(c->map, key, (void **)&iter);
+  struct cc_lru_list_node *node = NULL;
+  enum cdc_stat stat = cdc_hash_table_get(c->table, key, (void **)&node);
   if (stat != CDC_STATUS_OK) {
     return;
   }
 
-  struct cdc_pair *kv = cdc_list_iter_data(iter);
-  cdc_list_ierase(iter);
-  cdc_hash_table_erase(c->map, key);
-  free_list_item(c, kv);
+  list_unlink_node(&c->list, node);
+  cdc_hash_table_erase(c->table, key);
+  list_free_node(&c->list, node);
 }
 
 void cc_lru_cache_clear(struct cc_lru_cache *c)
 {
   assert(c != NULL);
 
-  cdc_hash_table_clear(c->map);
-  free_list_items(c);
-  cdc_list_clear(c->list);
+  cdc_hash_table_clear(c->table);
+  list_free_items(&c->list);
+  c->list.head = NULL;
+  c->list.tail = NULL;
 }

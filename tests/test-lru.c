@@ -45,11 +45,7 @@ static size_t hash(const void *val) { return cdc_hash_int(CDC_TO_INT(val)); }
 
 static bool lru_cache_kv_int_eq(struct cc_lru_cache *c, size_t count, ...)
 {
-  if (count != cdc_hash_table_size(c->map)) {
-    return false;
-  }
-
-  if (count != cdc_list_size(c->list)) {
+  if (count != cc_lru_cache_size(c)) {
     return false;
   }
 
@@ -57,15 +53,14 @@ static bool lru_cache_kv_int_eq(struct cc_lru_cache *c, size_t count, ...)
   va_start(args, count);
   for (size_t i = 0; i < count; ++i) {
     struct cdc_pair *val = va_arg(args, struct cdc_pair *);
-    struct cdc_list_iter *iter = NULL;
-    if (cdc_hash_table_get(c->map, val->first, (void **)&iter) !=
+    struct cc_lru_list_node *node = NULL;
+    if (cdc_hash_table_get(c->table, val->first, (void **)&node) !=
         CDC_STATUS_OK) {
       va_end(args);
       return false;
     }
 
-    struct cdc_pair *kv = (struct cdc_pair *)cdc_list_iter_data(iter);
-    if (kv->first != val->first || kv->second != val->second) {
+    if (node->kv.first != val->first || node->kv.second != val->second) {
       va_end(args);
       return false;
     }
@@ -99,8 +94,13 @@ void test_lru_cache_get()
 
   CU_ASSERT_EQUAL(cc_lru_cache_ctor(&cache, 2 /* max_size */, &info),
                   CDC_STATUS_OK);
-  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, a.first, a.second), CDC_STATUS_OK);
-  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, b.first, b.second), CDC_STATUS_OK);
+
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, a.first, a.second, NULL /*inserted */),
+      CDC_STATUS_OK);
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, b.first, b.second, NULL /*inserted */),
+      CDC_STATUS_OK);
 
   void *value = NULL;
   CU_ASSERT_EQUAL(cc_lru_cache_get(cache, b.first, &value), CDC_STATUS_OK);
@@ -112,14 +112,60 @@ void test_lru_cache_get()
   CU_ASSERT_EQUAL(cc_lru_cache_get(cache, d.first, &value),
                   CDC_STATUS_NOT_FOUND);
 
-  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, c.first, c.second), CDC_STATUS_OK);
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, c.first, c.second, NULL /*inserted */),
+      CDC_STATUS_OK);
   CU_ASSERT(lru_cache_kv_int_eq(cache, 2, &a, &c));
   cc_lru_cache_dtor(cache);
 }
 
-void test_lru_cache_contains() {}
+void test_lru_cache_contains()
+{
+  struct cdc_data_info info = CDC_INIT_STRUCT;
+  info.eq = eq;
+  info.hash = hash;
 
-void test_lru_cache_capacity() {}
+  struct cc_lru_cache *cache = NULL;
+
+  CU_ASSERT_EQUAL(cc_lru_cache_ctor(&cache, 2 /* max_size */, &info),
+                  CDC_STATUS_OK);
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, a.first, a.second, NULL /*inserted */),
+      CDC_STATUS_OK);
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, b.first, b.second, NULL /*inserted */),
+      CDC_STATUS_OK);
+
+  CU_ASSERT(cc_lru_cache_contains(cache, a.first));
+  CU_ASSERT(cc_lru_cache_contains(cache, b.first));
+  CU_ASSERT(!cc_lru_cache_contains(cache, c.first));
+  cc_lru_cache_dtor(cache);
+}
+
+void test_lru_cache_capacity()
+{
+  struct cdc_data_info info = CDC_INIT_STRUCT;
+  info.eq = eq;
+  info.hash = hash;
+
+  struct cc_lru_cache *cache = NULL;
+
+  CU_ASSERT_EQUAL(cc_lru_cache_ctor(&cache, 2 /* max_size */, &info),
+                  CDC_STATUS_OK);
+
+  CU_ASSERT_EQUAL(cc_lru_cache_max_size(cache), 2);
+  CU_ASSERT_EQUAL(cc_lru_cache_size(cache), 0);
+  CU_ASSERT(cc_lru_cache_empty(cache));
+
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, a.first, a.second, NULL /*inserted */),
+      CDC_STATUS_OK);
+
+  CU_ASSERT_EQUAL(cc_lru_cache_max_size(cache), 2);
+  CU_ASSERT_EQUAL(cc_lru_cache_size(cache), 1);
+  CU_ASSERT(!cc_lru_cache_empty(cache));
+  cc_lru_cache_dtor(cache);
+}
 
 void test_lru_cache_insert()
 {
@@ -131,16 +177,84 @@ void test_lru_cache_insert()
 
   CU_ASSERT_EQUAL(cc_lru_cache_ctor(&cache, 2 /* max_size */, &info),
                   CDC_STATUS_OK);
-  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, a.first, a.second), CDC_STATUS_OK);
-  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, b.first, b.second), CDC_STATUS_OK);
+
+  bool inserted = false;
+  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, a.first, a.second, &inserted),
+                  CDC_STATUS_OK);
+  CU_ASSERT(inserted);
+
+  inserted = false;
+  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, b.first, b.second, &inserted),
+                  CDC_STATUS_OK);
+  CU_ASSERT(inserted);
+
+  inserted = true;
+  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, b.first, b.second, &inserted),
+                  CDC_STATUS_OK);
+  CU_ASSERT(!inserted);
 
   CU_ASSERT(lru_cache_kv_int_eq(cache, 2, &a, &b));
 
-  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, c.first, c.second), CDC_STATUS_OK);
+  inserted = false;
+  CU_ASSERT_EQUAL(cc_lru_cache_insert(cache, c.first, c.second, &inserted),
+                  CDC_STATUS_OK);
+  CU_ASSERT(inserted);
   CU_ASSERT(lru_cache_kv_int_eq(cache, 2, &b, &c));
   cc_lru_cache_dtor(cache);
 }
 
-void test_lru_cache_erase() {}
+void test_lru_cache_erase()
+{
+  struct cdc_data_info info = CDC_INIT_STRUCT;
+  info.eq = eq;
+  info.hash = hash;
 
-void test_lru_cache_clear() {}
+  struct cc_lru_cache *cache = NULL;
+
+  CU_ASSERT_EQUAL(cc_lru_cache_ctor(&cache, 2 /* max_size */, &info),
+                  CDC_STATUS_OK);
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, a.first, a.second, NULL /*inserted */),
+      CDC_STATUS_OK);
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, b.first, b.second, NULL /*inserted */),
+      CDC_STATUS_OK);
+
+  CU_ASSERT(lru_cache_kv_int_eq(cache, 2, &a, &b));
+
+  cc_lru_cache_erase(cache, c.first);
+  CU_ASSERT(lru_cache_kv_int_eq(cache, 2, &a, &b));
+
+  cc_lru_cache_erase(cache, b.first);
+  CU_ASSERT(lru_cache_kv_int_eq(cache, 1, &a));
+
+  cc_lru_cache_erase(cache, a.first);
+  CU_ASSERT_EQUAL(cc_lru_cache_size(cache), 0);
+  CU_ASSERT(cc_lru_cache_empty(cache));
+  cc_lru_cache_dtor(cache);
+}
+
+void test_lru_cache_clear()
+{
+  struct cdc_data_info info = CDC_INIT_STRUCT;
+  info.eq = eq;
+  info.hash = hash;
+
+  struct cc_lru_cache *cache = NULL;
+
+  CU_ASSERT_EQUAL(cc_lru_cache_ctor(&cache, 2 /* max_size */, &info),
+                  CDC_STATUS_OK);
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, a.first, a.second, NULL /*inserted */),
+      CDC_STATUS_OK);
+  CU_ASSERT_EQUAL(
+      cc_lru_cache_insert(cache, b.first, b.second, NULL /*inserted */),
+      CDC_STATUS_OK);
+
+  cc_lru_cache_clear(cache);
+
+  CU_ASSERT_EQUAL(cc_lru_cache_max_size(cache), 2);
+  CU_ASSERT_EQUAL(cc_lru_cache_size(cache), 0);
+  CU_ASSERT(cc_lru_cache_empty(cache));
+  cc_lru_cache_dtor(cache);
+}

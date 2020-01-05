@@ -6,6 +6,9 @@ set(LIB_VERSION_PATCH 0)
 set(LIB_FULL_VERSION ${LIB_VERSION_MAJOR}.${LIB_VERSION_MINOR}.${LIB_VERSION_PATCH})
 
 set(SOURCE
+  2q.c
+  fifo.c
+  list.c
   lru.c
 )
 

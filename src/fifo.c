@@ -18,23 +18,17 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 // IN THE SOFTWARE.
-#include "ccache/lru.h"
+#include "ccache/fifo.h"
 
 #include "list.h"
 
 #include <cdcontainers/data-info.h>
 #include <cdcontainers/hash-table.h>
 
-static void update_position(struct cc_lru_cache *c, struct cc_list_node *node)
+static enum cdc_stat insert_new(struct cc_fifo_cache *c, void *key, void *value)
 {
-  cc_list_unlink_node(c->list, node);
-  cc_list_push_front_node(c->list, node);
-}
-
-static enum cdc_stat insert_new(struct cc_lru_cache *c, void *key, void *value)
-{
-  if (cc_lru_cache_size(c) + 1 > cc_lru_cache_max_size(c)) {
-    cc_lru_cache_erase(c, c->list->tail->kv.first);
+  if (cc_fifo_cache_size(c) + 1 > cc_fifo_cache_max_size(c)) {
+    cc_fifo_cache_erase(c, c->list->tail->kv.first);
   }
 
   struct cc_list_node *node = cc_list_new_node(key, value);
@@ -53,15 +47,15 @@ static enum cdc_stat insert_new(struct cc_lru_cache *c, void *key, void *value)
   return CDC_STATUS_OK;
 }
 
-enum cdc_stat cc_lru_cache_ctor(struct cc_lru_cache **c, size_t max_size,
-                                struct cdc_data_info *info)
+enum cdc_stat cc_fifo_cache_ctor(struct cc_fifo_cache **c, size_t max_size,
+                                 struct cdc_data_info *info)
 {
   assert(c != NULL);
   assert(info != NULL);
   assert(max_size > 0);
 
-  struct cc_lru_cache *tmp =
-      (struct cc_lru_cache *)malloc(sizeof(struct cc_lru_cache));
+  struct cc_fifo_cache *tmp =
+      (struct cc_fifo_cache *)malloc(sizeof(struct cc_fifo_cache));
   if (!tmp) {
     return CDC_STATUS_BAD_ALLOC;
   }
@@ -98,7 +92,7 @@ free_cache:
   return stat;
 }
 
-void cc_lru_cache_dtor(struct cc_lru_cache *c)
+void cc_fifo_cache_dtor(struct cc_fifo_cache *c)
 {
   assert(c != NULL);
 
@@ -107,7 +101,8 @@ void cc_lru_cache_dtor(struct cc_lru_cache *c)
   free(c);
 }
 
-enum cdc_stat cc_lru_cache_get(struct cc_lru_cache *c, void *key, void **value)
+enum cdc_stat cc_fifo_cache_get(struct cc_fifo_cache *c, void *key,
+                                void **value)
 {
   assert(c != NULL);
   assert(value != NULL);
@@ -118,41 +113,33 @@ enum cdc_stat cc_lru_cache_get(struct cc_lru_cache *c, void *key, void **value)
     return stat;
   }
 
-  update_position(c, node);
   *value = node->kv.second;
   return CDC_STATUS_OK;
 }
 
-bool cc_lru_cache_contains(struct cc_lru_cache *c, void *key)
+bool cc_fifo_cache_contains(struct cc_fifo_cache *c, void *key)
 {
   assert(c != NULL);
 
-  struct cc_list_node *node = NULL;
-  enum cdc_stat stat = cdc_hash_table_get(c->table, key, (void **)&node);
-  if (stat == CDC_STATUS_NOT_FOUND) {
-    return false;
-  }
-
-  update_position(c, node);
-  return true;
+  return cdc_hash_table_count(c->table, key) != 0;
 }
 
-size_t cc_lru_cache_size(struct cc_lru_cache *c)
+size_t cc_fifo_cache_size(struct cc_fifo_cache *c)
 {
   assert(c != NULL);
 
   return cdc_hash_table_size(c->table);
 }
 
-bool cc_lru_cache_empty(struct cc_lru_cache *c)
+bool cc_fifo_cache_empty(struct cc_fifo_cache *c)
 {
   assert(c != NULL);
 
   return cdc_hash_table_empty(c->table);
 }
 
-enum cdc_stat cc_lru_cache_insert(struct cc_lru_cache *c, void *key,
-                                  void *value, bool *inserted)
+enum cdc_stat cc_fifo_cache_insert(struct cc_fifo_cache *c, void *key,
+                                   void *value, bool *inserted)
 {
   assert(c != NULL);
 
@@ -172,8 +159,8 @@ enum cdc_stat cc_lru_cache_insert(struct cc_lru_cache *c, void *key,
   return stat;
 }
 
-enum cdc_stat cc_lru_cache_insert_or_assign(struct cc_lru_cache *c, void *key,
-                                            void *value, bool *inserted)
+enum cdc_stat cc_fifo_cache_insert_or_assign(struct cc_fifo_cache *c, void *key,
+                                             void *value, bool *inserted)
 {
   struct cc_list_node *node = NULL;
   if (cdc_hash_table_get(c->table, key, (void **)&node) == CDC_STATUS_OK) {
@@ -184,7 +171,6 @@ enum cdc_stat cc_lru_cache_insert_or_assign(struct cc_lru_cache *c, void *key,
     }
 
     node->kv.second = value;
-    update_position(c, node);
     if (inserted) {
       *inserted = false;
     }
@@ -200,7 +186,7 @@ enum cdc_stat cc_lru_cache_insert_or_assign(struct cc_lru_cache *c, void *key,
   return stat;
 }
 
-void cc_lru_cache_erase(struct cc_lru_cache *c, void *key)
+void cc_fifo_cache_erase(struct cc_fifo_cache *c, void *key)
 {
   assert(c != NULL);
 
@@ -215,7 +201,7 @@ void cc_lru_cache_erase(struct cc_lru_cache *c, void *key)
   cc_list_free_node(c->list, node, true /* remove_data */);
 }
 
-void cc_lru_cache_take(struct cc_lru_cache *c, void *key, struct cdc_pair *kv)
+void cc_fifo_cache_take(struct cc_fifo_cache *c, void *key, struct cdc_pair *kv)
 {
   assert(c != NULL);
 
@@ -231,7 +217,7 @@ void cc_lru_cache_take(struct cc_lru_cache *c, void *key, struct cdc_pair *kv)
   cc_list_free_node(c->list, node, false /* remove_data */);
 }
 
-void cc_lru_cache_clear(struct cc_lru_cache *c)
+void cc_fifo_cache_clear(struct cc_fifo_cache *c)
 {
   assert(c != NULL);
 

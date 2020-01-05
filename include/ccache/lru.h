@@ -27,25 +27,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct cc_list;
 struct cdc_hash_table;
 struct cdc_data_info;
-
-struct cc_lru_list_node {
-  struct cc_lru_list_node *next;
-  struct cc_lru_list_node *prev;
-  struct cdc_pair kv;
-};
-
-struct cc_lru_list {
-  struct cc_lru_list_node *head;
-  struct cc_lru_list_node *tail;
-  struct cdc_data_info *dinfo;
-};
 
 struct cc_lru_cache {
   size_t max_size;
   // Stores pairs of key and value.
-  struct cc_lru_list list;
+  struct cc_list *list;
   // Stores pairs of key and list iterator.
   struct cdc_hash_table *table;
 };
@@ -60,7 +49,7 @@ enum cdc_stat cc_lru_cache_get(struct cc_lru_cache *c, void *key, void **value);
 bool cc_lru_cache_contains(struct cc_lru_cache *c, void *key);
 
 // Capacity
-size_t cc_lru_cache_max_size(struct cc_lru_cache *c)
+static inline size_t cc_lru_cache_max_size(struct cc_lru_cache *c)
 {
   assert(c != NULL);
 
@@ -77,6 +66,7 @@ enum cdc_stat cc_lru_cache_insert_or_assign(struct cc_lru_cache *c, void *key,
                                             void *value, bool *inserted);
 
 void cc_lru_cache_erase(struct cc_lru_cache *c, void *key);
+void cc_lru_cache_take(struct cc_lru_cache *c, void *key, struct cdc_pair *kv);
 void cc_lru_cache_clear(struct cc_lru_cache *c);
 
 // Short names
@@ -101,6 +91,7 @@ typedef struct cc_lru_cache lru_cache_t;
 #define lru_cache_insert_or_assign(...) \
   cc_lru_cache_insert_or_assign(__VA_ARGS__)
 #define lru_cache_erase(...) cc_lru_cache_erase(__VA_ARGS__)
+#define lru_cache_take(...) cc_lru_cache_take(__VA_ARGS__)
 #define lru_cache_clear(...) cc_lru_cache_clear(__VA_ARGS__)
 #endif
 #endif  // CCACHE_INCLUDE_CCACHE_LRU_H
